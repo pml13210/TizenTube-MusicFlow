@@ -1,8 +1,8 @@
 {
-  "name": "@foxreis/tizentube",
-  "appName": "TizenTube",
-  "version": "1.15.0",
-  "description": "TizenTube is an ad-free and sponsor-free solution for your favourite streaming website on your Tizen (Samsung) TVs.",
+  "name": "@pml13210/tizentube-musicflow",
+  "appName": "TizenTube MusicFlow",
+  "version": "1.15.0-musicflow.1",
+  "description": "TizenTube fork with a MusicFlow request bridge running inside the YouTube TV environment.",
   "packageType": "mods",
   "websiteURL": "https://youtube.com/tv?additionalDataUrl=http%3A%2F%2Flocalhost%3A8085%2Fdial%2Fapps%2FYouTube",
   "main": "dist/userScript.js",
@@ -19,7 +19,7 @@
     "MediaTrackPrevious"
   ],
   "repository": {
-    "url": "https://github.com/reisxd/TizenTube"
+    "url": "https://github.com/pml13210/TizenTube-MusicFlow"
   },
   "license": "GPL-3.0-only"
 }

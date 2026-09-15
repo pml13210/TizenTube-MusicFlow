@@ -12,6 +12,93 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.use(express.json({ limit: '1mb' }));
+
+const MUSICFLOW_BRIDGE_TOKEN = String(process.env.MUSICFLOW_BRIDGE_TOKEN || '').trim();
+const MUSICFLOW_REQUEST_TIMEOUT_MS = 16000;
+const MUSICFLOW_ACTIONS = new Set(['search', 'metadata', 'stream', 'video', 'prefetch']);
+const musicFlowJobs = [];
+const musicFlowPending = new Map();
+
+function isMusicFlowAuthorized(req) {
+    if (!MUSICFLOW_BRIDGE_TOKEN) return true;
+    return String(req.get('x-musicflow-token') || '') === MUSICFLOW_BRIDGE_TOKEN;
+}
+
+function removeMusicFlowJob(id) {
+    const index = musicFlowJobs.findIndex(job => job.id === id);
+    if (index !== -1) musicFlowJobs.splice(index, 1);
+}
+
+app.get('/musicflow/health', (_req, res) => {
+    res.json({
+        ok: true,
+        service: 'tizentube-musicflow-bridge',
+        queueDepth: musicFlowJobs.length,
+        pending: musicFlowPending.size,
+        auth: MUSICFLOW_BRIDGE_TOKEN ? 'token' : 'open-lan',
+    });
+});
+
+app.post('/musicflow/request', (req, res) => {
+    if (!isMusicFlowAuthorized(req)) {
+        return res.status(401).json({ ok: false, error: 'MusicFlow token invalide' });
+    }
+
+    const payload = req.body || {};
+    const action = String(payload.action || '');
+    if (!MUSICFLOW_ACTIONS.has(action)) {
+        return res.status(400).json({ ok: false, error: 'Action MusicFlow invalide' });
+    }
+    if (action === 'search' && !String(payload.query || '').trim()) {
+        return res.status(400).json({ ok: false, error: 'Recherche MusicFlow vide' });
+    }
+    if (action !== 'search' && !String(payload.url || '').trim()) {
+        return res.status(400).json({ ok: false, error: 'URL YouTube manquante' });
+    }
+
+    const id = uuid.v4();
+    const job = {
+        id,
+        action,
+        query: payload.query,
+        max: payload.max,
+        url: payload.url,
+        createdAt: Date.now(),
+    };
+
+    const timer = setTimeout(() => {
+        removeMusicFlowJob(id);
+        const pending = musicFlowPending.get(id);
+        musicFlowPending.delete(id);
+        if (pending && !pending.res.headersSent) {
+            pending.res.status(504).json({ ok: false, error: 'TizenTube n’a pas répondu à temps' });
+        }
+    }, MUSICFLOW_REQUEST_TIMEOUT_MS);
+
+    musicFlowPending.set(id, { res, timer });
+    musicFlowJobs.push(job);
+});
+
+app.get('/musicflow/jobs/next', (_req, res) => {
+    while (musicFlowJobs.length) {
+        const job = musicFlowJobs.shift();
+        if (job && musicFlowPending.has(job.id)) return res.json(job);
+    }
+    return res.status(204).end();
+});
+
+app.post('/musicflow/jobs/:id/result', (req, res) => {
+    const id = String(req.params.id || '');
+    const pending = musicFlowPending.get(id);
+    if (!pending) return res.status(404).json({ ok: false, error: 'Job MusicFlow expiré ou inconnu' });
+
+    clearTimeout(pending.timer);
+    musicFlowPending.delete(id);
+    removeMusicFlowJob(id);
+    if (!pending.res.headersSent) pending.res.status(200).json(req.body || { ok: false, error: 'Réponse vide' });
+    return res.json({ ok: true });
+});
 
 const PORT = global.isTizenTube ? 8095 : 8085;
 const apps = {
@@ -32,8 +119,8 @@ const apps = {
                     [
                         new tizen.ApplicationControlData("module", [JSON.stringify(
                             {
-                                moduleName: '@foxreis/tizentube',
-                                moduleType: 'npm',
+                                moduleName: 'pml13210/TizenTube-MusicFlow@main',
+                                moduleType: 'gh',
                                 args: launchData
                             }
                         )])
