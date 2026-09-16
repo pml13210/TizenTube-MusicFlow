@@ -1,13 +1,4 @@
-const POLL_INTERVAL_MS = 450;
 const REQUEST_TIMEOUT_MS = 15000;
-const SERVICE_PORTS = [8095, 8085];
-
-let serviceBaseUrl = null;
-let polling = false;
-
-function delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function getMappings() {
     if (!window._yttv) return null;
@@ -253,65 +244,19 @@ async function executeJob(job) {
     return { ok: true, source: 'tizentube', videoUrl: format.url, streamType: 'video' };
 }
 
-async function detectService() {
-    if (serviceBaseUrl) return serviceBaseUrl;
-    for (const port of SERVICE_PORTS) {
-        const candidate = `http://127.0.0.1:${port}/musicflow`;
+window.TizenTubeMusicFlow = Object.freeze({
+    async execute(job) {
         try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 1200);
-            const response = await fetch(`${candidate}/health`, { cache: 'no-store', signal: controller.signal });
-            clearTimeout(timer);
-            if (response.ok) {
-                serviceBaseUrl = candidate;
-                return candidate;
-            }
-        } catch (_) {
-            // Try the next known TizenTube/TizenBrew port.
-        }
-    }
-    return null;
-}
-
-async function submitResult(base, id, result) {
-    await fetch(`${base}/jobs/${encodeURIComponent(id)}/result`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(result),
-    });
-}
-
-async function pollOnce() {
-    if (polling) return;
-    polling = true;
-    try {
-        const base = await detectService();
-        if (!base) return;
-        const response = await fetch(`${base}/jobs/next`, { cache: 'no-store' });
-        if (response.status === 204) return;
-        if (!response.ok) throw new Error(`Bridge local ${response.status}`);
-        const job = await response.json();
-        try {
-            const result = await executeJob(job);
-            await submitResult(base, job.id, result);
+            return await executeJob(job);
         } catch (error) {
-            await submitResult(base, job.id, {
+            return {
                 ok: false,
+                source: 'tizentube',
                 error: error instanceof Error ? error.message : String(error),
-            });
+            };
         }
-    } catch (_) {
-        serviceBaseUrl = null;
-    } finally {
-        polling = false;
-    }
-}
-
-async function startMusicFlowBridge() {
-    while (true) {
-        await pollOnce();
-        await delay(POLL_INTERVAL_MS);
-    }
-}
-
-startMusicFlowBridge();
+    },
+    isReady() {
+        return Boolean(getInnerTubeClient());
+    },
+});
