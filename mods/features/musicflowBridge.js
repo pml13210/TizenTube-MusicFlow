@@ -1,4 +1,7 @@
 const REQUEST_TIMEOUT_MS = 15000;
+const PLAYER_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+const PLAYER_CLIENT_VERSION = '20.10.38';
+const SEARCH_CLIENT_VERSION = '2.20260114.08.00';
 
 function getMappings() {
     if (!window._yttv) return null;
@@ -6,15 +9,23 @@ function getMappings() {
     return mapped ? mapped.mappings : null;
 }
 
+function unwrapMapping(entry) {
+    if (entry && typeof entry === 'object' && Object.prototype.hasOwnProperty.call(entry, 'value')) {
+        return entry.value;
+    }
+    return entry;
+}
+
 function getInnerTubeClient() {
     const mappings = getMappings();
     if (!mappings) return null;
-    return mappings.get('KabukiInnerTubeClient') || null;
+    const client = unwrapMapping(mappings.get('KabukiInnerTubeClient'));
+    return client && typeof client.fetch === 'function' ? client : null;
 }
 
 async function getIdentity() {
     const mappings = getMappings();
-    const identityService = mappings && mappings.get('CurrentIdentityService');
+    const identityService = unwrapMapping(mappings && mappings.get('CurrentIdentityService'));
     if (!identityService || typeof identityService.get !== 'function') return undefined;
     try {
         return await identityService.get();
@@ -56,6 +67,106 @@ function innerTubeFetch(path, payload = {}) {
             reject(error);
         }
     });
+}
+
+async function directPlayerFetch(videoId) {
+    const url = 'https://www.youtube.com/youtubei/v1/player?key=' + PLAYER_API_KEY + '&prettyPrint=false';
+    const headers = {
+        accept: 'application/json',
+        'content-type': 'application/json',
+    };
+    const body = JSON.stringify({
+        context: {
+            client: {
+                clientName: 'ANDROID',
+                clientVersion: PLAYER_CLIENT_VERSION,
+                androidSdkVersion: 30,
+                hl: 'fr',
+                gl: 'FR',
+                userAgent: 'com.google.android.youtube/' + PLAYER_CLIENT_VERSION + ' (Linux; U; Android 11) gzip',
+            },
+            request: { useSsl: true },
+        },
+        videoId,
+        racyCheckOk: true,
+        contentCheckOk: true,
+    });
+
+    const desktopTransport = window.musicFlowTizenTubeTransport;
+    if (desktopTransport && typeof desktopTransport.request === 'function') {
+        const transported = await desktopTransport.request({
+            url,
+            method: 'POST',
+            headers,
+            body,
+        });
+        if (!transported || transported.ok !== true) {
+            throw new Error('Player transport HTTP ' + String(transported && transported.status || 0));
+        }
+        try {
+            return JSON.parse(String(transported.body || ''));
+        } catch (_) {
+            throw new Error('Player transport JSON invalide');
+        }
+    }
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        credentials: 'omit',
+        redirect: 'error',
+        referrerPolicy: 'no-referrer',
+        body,
+    });
+
+    if (!response.ok) {
+        throw new Error('Player HTTP ' + response.status);
+    }
+    return response.json();
+}
+
+async function resolvePlayerResponse(videoId, action) {
+    try {
+        const sessionResponse = await innerTubeFetch('/youtubei/v1/player', {
+            videoId,
+            racyCheckOk: true,
+            contentCheckOk: true,
+        });
+        if (action === 'metadata' || action === 'prefetch' || selectStream(sessionResponse, action)) {
+            return sessionResponse;
+        }
+    } catch (_) {
+        // The YouTube TV client can be unavailable during bootstrap. The Android player request below
+        // remains the provider-agnostic fallback used by desktop and other installed surfaces.
+    }
+    return directPlayerFetch(videoId);
+}
+
+async function directSearchFetch(query) {
+    const response = await fetch('https://www.youtube.com/youtubei/v1/search?key=' + PLAYER_API_KEY + '&prettyPrint=false', {
+        method: 'POST',
+        headers: {
+            accept: 'application/json',
+            'content-type': 'application/json',
+        },
+        credentials: 'omit',
+        redirect: 'error',
+        referrerPolicy: 'no-referrer',
+        body: JSON.stringify({
+            context: {
+                client: {
+                    clientName: 'WEB',
+                    clientVersion: SEARCH_CLIENT_VERSION,
+                    hl: 'fr',
+                    gl: 'FR',
+                },
+                request: { useSsl: true },
+            },
+            query: String(query || ''),
+        }),
+    });
+    if (!response.ok) throw new Error('Recherche HTTP ' + response.status);
+    return response.json();
 }
 
 function textFromRuns(value) {
@@ -110,7 +221,7 @@ function collectSearchVideos(node, output, seen) {
     }
 
     const lockup = node.lockupViewModel;
-    if (lockup && lockup.contentId && !seen.has(lockup.contentId)) {
+    if (lockup && /^[A-Za-z0-9_-]{11}$/.test(String(lockup.contentId)) && !seen.has(lockup.contentId)) {
         const metadata = lockup.metadata && lockup.metadata.lockupMetadataViewModel;
         const title = textFromRuns(metadata && metadata.title) || 'YouTube';
         seen.add(lockup.contentId);
@@ -186,7 +297,11 @@ function selectStream(response, action) {
         .sort((a, b) => bitrate(b) - bitrate(a));
 
     if (action === 'stream') return audioOnly[0] || muxed[0] || null;
-    return muxed[0] || null;
+    if (muxed[0]) return muxed[0];
+    if (typeof streamingData.hlsManifestUrl === 'string' && streamingData.hlsManifestUrl.startsWith('http')) {
+        return { url: streamingData.hlsManifestUrl, mimeType: 'application/x-mpegURL', protocol: 'hls' };
+    }
+    return null;
 }
 
 function extractVideoMetadata(response, videoId) {
@@ -210,20 +325,22 @@ async function executeJob(job) {
     if (!job || !job.action) throw new Error('Job MusicFlow invalide');
 
     if (job.action === 'search') {
-        const response = await innerTubeFetch('/youtubei/v1/search', { query: String(job.query || '') });
+        let response;
+        try {
+            response = await innerTubeFetch('/youtubei/v1/search', { query: String(job.query || '') });
+        } catch (error) {
+            if (!/KabukiInnerTubeClient indisponible/i.test(String(error && error.message || error))) throw error;
+            response = await directSearchFetch(job.query);
+        }
         const videos = [];
         collectSearchVideos(response, videos, new Set());
         const max = Math.max(1, Math.min(30, Number(job.max || 10)));
         return { ok: true, source: 'tizentube', videos: videos.slice(0, max) };
     }
 
-    const videoId = extractVideoId(job.url);
+    const videoId = extractVideoId(job.videoId || job.url);
     if (!videoId) throw new Error('URL/ID YouTube manquant');
-    const response = await innerTubeFetch('/youtubei/v1/player', {
-        videoId,
-        racyCheckOk: true,
-        contentCheckOk: true,
-    });
+    const response = await resolvePlayerResponse(videoId, job.action);
 
     if (job.action === 'metadata') {
         return { ok: true, source: 'tizentube', video: extractVideoMetadata(response, videoId) };
@@ -257,6 +374,6 @@ window.TizenTubeMusicFlow = Object.freeze({
         }
     },
     isReady() {
-        return Boolean(getInnerTubeClient());
+        return typeof window.fetch === 'function';
     },
 });
