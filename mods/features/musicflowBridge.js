@@ -69,22 +69,52 @@ function innerTubeFetch(path, payload = {}) {
     });
 }
 
+async function resolveAnonymousVisitorData() {
+    try {
+        const identity = await getIdentity();
+        const candidates = [
+            identity && identity.visitorData,
+            identity && identity.context && identity.context.client && identity.context.client.visitorData,
+        ];
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.length > 8) return candidate;
+        }
+    } catch (_) {}
+
+    try {
+        if (window.ytcfg && typeof window.ytcfg.get === 'function') {
+            const context = window.ytcfg.get('INNERTUBE_CONTEXT');
+            const candidates = [
+                window.ytcfg.get('VISITOR_DATA'),
+                context && context.client && context.client.visitorData,
+            ];
+            for (const candidate of candidates) {
+                if (typeof candidate === 'string' && candidate.length > 8) return candidate;
+            }
+        }
+    } catch (_) {}
+    return undefined;
+}
+
 async function directPlayerFetch(videoId) {
     const url = 'https://www.youtube.com/youtubei/v1/player?key=' + PLAYER_API_KEY + '&prettyPrint=false';
     const headers = {
         accept: 'application/json',
         'content-type': 'application/json',
     };
+    const visitorData = await resolveAnonymousVisitorData();
+    const client = {
+        clientName: 'ANDROID',
+        clientVersion: PLAYER_CLIENT_VERSION,
+        androidSdkVersion: 30,
+        hl: 'fr',
+        gl: 'FR',
+        userAgent: 'com.google.android.youtube/' + PLAYER_CLIENT_VERSION + ' (Linux; U; Android 11) gzip',
+    };
+    if (visitorData) client.visitorData = visitorData;
     const body = JSON.stringify({
         context: {
-            client: {
-                clientName: 'ANDROID',
-                clientVersion: PLAYER_CLIENT_VERSION,
-                androidSdkVersion: 30,
-                hl: 'fr',
-                gl: 'FR',
-                userAgent: 'com.google.android.youtube/' + PLAYER_CLIENT_VERSION + ' (Linux; U; Android 11) gzip',
-            },
+            client,
             request: { useSsl: true },
         },
         videoId,
