@@ -175,8 +175,9 @@ async function resolvePlayerResponse(videoId, action) {
 function getRuntimeCommandResolver() {
     if (!window._yttv) return null;
     for (const key in window._yttv) {
-        const resolver = window._yttv[key] && window._yttv[key].instance && window._yttv[key].instance.resolveCommand;
-        if (typeof resolver === 'function') return resolver;
+        const instance = window._yttv[key] && window._yttv[key].instance;
+        const resolver = instance && instance.resolveCommand;
+        if (typeof resolver === 'function') return resolver.bind(instance);
     }
     return null;
 }
