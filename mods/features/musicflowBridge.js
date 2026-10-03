@@ -527,6 +527,7 @@ async function executeJob(job) {
 }
 
 window.TizenTubeMusicFlow = Object.freeze({
+    revision: 'runtime-command-context-v1',
     async execute(job) {
         try {
             return await executeJob(job);
