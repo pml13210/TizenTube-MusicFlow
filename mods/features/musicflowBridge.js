@@ -172,6 +172,111 @@ async function resolvePlayerResponse(videoId, action) {
     return directPlayerFetch(videoId);
 }
 
+function getRuntimeCommandResolver() {
+    if (!window._yttv) return null;
+    for (const key in window._yttv) {
+        const resolver = window._yttv[key] && window._yttv[key].instance && window._yttv[key].instance.resolveCommand;
+        if (typeof resolver === 'function') return resolver;
+    }
+    return null;
+}
+
+function runtimeVideoElement() {
+    return document.querySelector('video');
+}
+
+function runtimeVideoId() {
+    try {
+        const player = document.querySelector('.html5-video-player');
+        const data = player && typeof player.getVideoData === 'function' ? player.getVideoData() : null;
+        return String(data && (data.video_id || data.videoId) || '');
+    } catch (_) {
+        return '';
+    }
+}
+
+function runtimeState() {
+    const video = runtimeVideoElement();
+    return {
+        ready: Boolean(video),
+        videoId: runtimeVideoId(),
+        currentTime: Number(video && video.currentTime || 0),
+        duration: Number(video && video.duration || 0),
+        paused: video ? Boolean(video.paused) : true,
+        ended: video ? Boolean(video.ended) : false,
+        volume: video ? Number(video.volume || 0) : 0,
+    };
+}
+
+async function waitForRuntimeCommandResolver() {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < REQUEST_TIMEOUT_MS) {
+        if (getRuntimeCommandResolver()) return;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error('Runtime TizenTube TV indisponible');
+}
+
+async function waitForRuntimeVideo(videoId) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < REQUEST_TIMEOUT_MS) {
+        const video = runtimeVideoElement();
+        const activeVideoId = runtimeVideoId();
+        if (video && (activeVideoId === videoId || (!activeVideoId && video.readyState > 0))) {
+            return video;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error('Lecteur TizenTube TV indisponible');
+}
+
+async function playInRuntime(videoId) {
+    await waitForRuntimeCommandResolver();
+    const resolver = getRuntimeCommandResolver();
+    if (!resolver) throw new Error('Runtime TizenTube TV indisponible');
+    resolver({ watchEndpoint: { videoId } });
+    const video = await waitForRuntimeVideo(videoId);
+    try {
+        await video.play();
+    } catch (_) {
+        // Android/iOS configure the embedded WebView for autoplay. If WebKit still defers
+        // playback, MusicFlow can retry with runtimeControl('play') from the user gesture.
+    }
+    return runtimeState();
+}
+
+async function controlRuntime(command, value, videoId) {
+    if (command === 'load') {
+        if (!videoId) throw new Error('videoId TizenTube manquant');
+        return playInRuntime(videoId);
+    }
+
+    if (command === 'state') {
+        return runtimeState();
+    }
+
+    const video = runtimeVideoElement();
+    if (!video) throw new Error('Lecteur TizenTube TV indisponible');
+
+    if (command === 'play') {
+        await video.play();
+    } else if (command === 'pause') {
+        video.pause();
+    } else if (command === 'seek') {
+        const target = Number(value);
+        if (!Number.isFinite(target)) throw new Error('Position TizenTube invalide');
+        video.currentTime = Math.max(0, Math.min(Number(video.duration || target), target));
+    } else if (command === 'volume') {
+        const target = Number(value);
+        if (!Number.isFinite(target)) throw new Error('Volume TizenTube invalide');
+        video.volume = Math.max(0, Math.min(1, target));
+    } else {
+        throw new Error('Commande TizenTube native non autorisée');
+    }
+
+    return runtimeState();
+}
+
 async function directSearchFetch(query) {
     const response = await fetch('https://www.youtube.com/youtubei/v1/search?key=' + PLAYER_API_KEY + '&prettyPrint=false', {
         method: 'POST',
@@ -354,6 +459,11 @@ function extractVideoMetadata(response, videoId) {
 async function executeJob(job) {
     if (!job || !job.action) throw new Error('Job MusicFlow invalide');
 
+    if (job.action === 'control') {
+        const runtime = await controlRuntime(job.command, job.value, extractVideoId(job.videoId || job.url));
+        return { ok: true, source: 'tizentube-runtime', playbackKind: 'native', runtime };
+    }
+
     if (job.action === 'search') {
         let response;
         try {
@@ -370,7 +480,22 @@ async function executeJob(job) {
 
     const videoId = extractVideoId(job.videoId || job.url);
     if (!videoId) throw new Error('URL/ID YouTube manquant');
-    const response = await resolvePlayerResponse(videoId, job.action);
+
+    let response;
+    try {
+        response = await resolvePlayerResponse(videoId, job.action);
+    } catch (error) {
+        if (job.action === 'video') {
+            return {
+                ok: true,
+                source: 'tizentube-runtime',
+                videoUrl: `tizentube://runtime/${videoId}`,
+                streamType: 'video',
+                playbackKind: 'native',
+            };
+        }
+        throw error;
+    }
 
     if (job.action === 'metadata') {
         return { ok: true, source: 'tizentube', video: extractVideoMetadata(response, videoId) };
@@ -382,13 +507,22 @@ async function executeJob(job) {
 
     const format = selectStream(response, job.action);
     if (!format || !format.url) {
+        if (job.action === 'video') {
+            return {
+                ok: true,
+                source: 'tizentube-runtime',
+                videoUrl: `tizentube://runtime/${videoId}`,
+                streamType: 'video',
+                playbackKind: 'native',
+            };
+        }
         throw new Error('TizenTube n’a retourné aucun flux direct non-DRM exploitable');
     }
 
     if (job.action === 'stream') {
         return { ok: true, source: 'tizentube', audioUrl: format.url, streamType: 'audio' };
     }
-    return { ok: true, source: 'tizentube', videoUrl: format.url, streamType: 'video' };
+    return { ok: true, source: 'tizentube', videoUrl: format.url, streamType: 'video', playbackKind: 'stream' };
 }
 
 window.TizenTubeMusicFlow = Object.freeze({
